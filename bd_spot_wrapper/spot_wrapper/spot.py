@@ -14,7 +14,6 @@
 import os
 import os.path as osp
 import time
-import traceback
 from collections import OrderedDict
 from typing import Any, Dict, List, Tuple
 
@@ -25,7 +24,7 @@ import cv2
 import magnum as mn
 import numpy as np
 import quaternion
-import rospy
+# import rospy
 
 try:
     import sophuspy as sp
@@ -75,20 +74,20 @@ from bosdyn.client.robot_command import (
 )
 from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.util import seconds_to_duration
-from geometry_msgs.msg import Pose, TransformStamped
+# from geometry_msgs.msg import Pose, TransformStamped
 from google.protobuf import wrappers_pb2  # type: ignore
-from perception_and_utils.utils.conversions import (
-    bd_SE3Pose_to_ros_Pose,
-    bd_SE3Pose_to_ros_TransformStamped,
-    bd_SE3Pose_to_sophus_SE3,
-)
-from spot_rl.utils.gripper_t_intel_path import GRIPPER_T_INTEL_PATH
-from spot_rl.utils.pixel_to_3d_conversion_utils import project_3d_to_pixel_uv
-from spot_rl.utils.utils import ros_frames as rf
-from spot_wrapper.utils import (
-    get_angle_between_forward_and_target,
-    get_position_and_vel_values,
-)
+# from perception_and_utils.utils.conversions import (
+#     bd_SE3Pose_to_ros_Pose,
+#     bd_SE3Pose_to_ros_TransformStamped,
+#     bd_SE3Pose_to_sophus_SE3,
+# )
+# from spot_rl.utils.gripper_t_intel_path import GRIPPER_T_INTEL_PATH
+# from spot_rl.utils.pixel_to_3d_conversion_utils import project_3d_to_pixel_uv
+# from spot_rl.utils.utils import ros_frames as rf
+# from spot_wrapper.utils import (
+#     get_angle_between_forward_and_target,
+#     get_position_and_vel_values,
+# )
 
 # Get Spot password and IP address
 env_err_msg = (
@@ -107,13 +106,22 @@ try:
 except KeyError:
     raise RuntimeError(env_err_msg.format(var_name="SPOT_IP"))
 
+# ARM_6DOF_NAMES = [
+#     rf.SPOT_ARM_SHOULDER_0,
+#     rf.SPOT_ARM_SHOULDER_1,
+#     rf.SPOT_ARM_ELBOW_0,
+#     rf.SPOT_ARM_ELBOW_1,
+#     rf.SPOT_ARM_WRIST_0,
+#     rf.SPOT_ARM_WRIST_1,
+# ]
+
 ARM_6DOF_NAMES = [
-    rf.SPOT_ARM_SHOULDER_0,
-    rf.SPOT_ARM_SHOULDER_1,
-    rf.SPOT_ARM_ELBOW_0,
-    rf.SPOT_ARM_ELBOW_1,
-    rf.SPOT_ARM_WRIST_0,
-    rf.SPOT_ARM_WRIST_1,
+    'arm0.sh0',
+    'arm0.sh1',
+    'arm0.el0',
+    'arm0.el1',
+    'arm0.wr0',
+    'arm0.wr1',
 ]
 
 HOME_TXT = osp.join(osp.dirname(osp.abspath(__file__)), "home.txt")
@@ -216,14 +224,9 @@ class Spot:
             self.intelrealsense_image_client = robot.ensure_client(
                 "intel-realsense-image-service"
             )
-            self.gripper_T_intel: sp.SE3 = sp.SE3(np.load(GRIPPER_T_INTEL_PATH))
-            print(f"Loaded gripper_T_intel (sp.SE3) as {self.gripper_T_intel.matrix()}")
-
         except Exception:
             print("There is no intel-realsense-image_service. Using gripper cameras")
             self.intelrealsense_image_client = None
-            self.gripper_T_intel = None
-            print(f"Loaded gripper_T_intel (sp.SE3) as {self.gripper_T_intel}")
 
         self.manipulation_api_client = robot.ensure_client(
             ManipulationApiClient.default_service_name
@@ -235,9 +238,20 @@ class Spot:
             InverseKinematicsClient.default_service_name
         )
 
+        # TODO: Add safety net
+        # self.gripper_T_intel: sp.SE3 = sp.SE3(np.load(GRIPPER_T_INTEL_PATH))
+        # print(f"Loaded gripper_T_intel (sp.SE3) as {self.gripper_T_intel.matrix()}")
+
         # Used to re-center origin of global frame
-        # Read home.txt file and port its contents.
-        (self.global_T_home, self.robot_recenter_yaw) = self.read_home_robot()
+        if osp.isfile(HOME_TXT):
+            with open(HOME_TXT) as f:
+                data = f.read()
+            self.global_T_home = np.array([float(d) for d in data.split(", ")[:9]])
+            self.global_T_home = self.global_T_home.reshape([3, 3])
+            self.robot_recenter_yaw = float(data.split(", ")[-1])
+        else:
+            self.global_T_home = None
+            self.robot_recenter_yaw = None
 
         # Print the battery charge level of the robot
         self.loginfo(f"Current battery charge: {self.get_battery_charge()}%")
@@ -406,7 +420,7 @@ class Spot:
         return success_status
 
     def move_gripper_to_point(
-        self, point, rotation, seconds_to_goal=3.0, timeout_sec=10, return_cmd=False
+        self, point, rotation, seconds_to_goal=3.0, timeout_sec=10
     ):
         """
         Moves EE to a point relative to body frame
@@ -450,9 +464,6 @@ class Spot:
         command = robot_command_pb2.RobotCommand(
             synchronized_command=synchronized_command
         )
-        if return_cmd:
-            return command
-
         cmd_id = self.command_client.robot_command(command)
 
         success_status = self.block_until_arm_arrives(cmd_id, timeout_sec=timeout_sec)
@@ -649,7 +660,7 @@ class Spot:
     def grasp_point_in_image_with_IK(
         self,
         point_in_gripper: np.ndarray,
-        body_T_cam: mn.Matrix4,
+        body_T_cam,
         gripper_pose_quat: List[float] = None,
         solution_angles: np.ndarray = np.zeros((3,)),
         timeout=10,
@@ -1083,52 +1094,6 @@ class Spot:
         )
         return cmd_id
 
-    def set_base_vel_and_arm_ee_pos(
-        self,
-        x_vel,
-        y_vel,
-        ang_vel,
-        arm_ee_action,
-        travel_time,
-        disable_obstacle_avoidance=False,
-    ):
-        base_cmd = self.set_base_velocity(
-            x_vel,
-            y_vel,
-            ang_vel,
-            vel_time=travel_time,
-            disable_obstacle_avoidance=disable_obstacle_avoidance,
-            return_cmd=True,
-        )
-        arm_cmd = self.move_gripper_to_point(
-            point=arm_ee_action[0:3],
-            rotation=list(arm_ee_action[3:]),
-            seconds_to_goal=travel_time,
-            return_cmd=True,
-        )
-        synchro_command = RobotCommandBuilder.build_synchro_command(base_cmd, arm_cmd)
-        cmd_id = self.command_client.robot_command(
-            synchro_command, end_time_secs=time.time() + travel_time
-        )
-        return cmd_id
-
-    def set_arm_ee_pos(
-        self,
-        arm_ee_action,
-        travel_time,
-    ):
-        arm_cmd = self.move_gripper_to_point(
-            point=arm_ee_action[0:3],
-            rotation=list(arm_ee_action[3:]),
-            seconds_to_goal=travel_time,
-            return_cmd=True,
-        )
-        synchro_command = RobotCommandBuilder.build_synchro_command(arm_cmd)
-        cmd_id = self.command_client.robot_command(
-            synchro_command, end_time_secs=time.time() + travel_time
-        )
-        return cmd_id
-
     def get_xy_yaw(self, use_boot_origin=False, robot_state=None):
         """
         Returns the relative x and y distance from start, as well as relative heading
@@ -1169,45 +1134,19 @@ class Spot:
         )
         return local_T_global
 
-    def write_home_robot(self):
-        """
-        Updates home frame to current robot frame. Spot-sim2real uses home frame as its global frame for all skills
-        """
-        # Init local variables
-        global_T_home = None
-        robot_recenter_yaw = None
-
-        print("Updating robot pose w.r.t home in home.txt")
-        _, _, yaw = self.get_xy_yaw(use_boot_origin=True)  # vision_T_body
+    def home_robot(self, write_to_file: bool = False):
+        print(f"Updating robot pose w.r.t home. write_to_file={write_to_file}")
+        x, y, yaw = self.get_xy_yaw(use_boot_origin=True)
         local_T_global = self._get_local_T_global()
-        global_T_home = np.linalg.inv(local_T_global)
-        robot_recenter_yaw = yaw
+        self.global_T_home = np.linalg.inv(local_T_global)
+        self.robot_recenter_yaw = yaw
 
-        try:
-            as_string = list(global_T_home.flatten()) + [robot_recenter_yaw]
+        if write_to_file:
+            as_string = list(self.global_T_home.flatten()) + [yaw]
             as_string = f"{as_string}"[1:-1]  # [1:-1] removes brackets
             with open(HOME_TXT, "w") as f:
                 f.write(as_string)
-            print(f"Wrote: \n{as_string}\nto: {HOME_TXT}")
-        except Exception:
-            print(
-                "Encountered exception while persisting global_T_home into home.txt file",
-                traceback.print_exc(),
-            )
-
-    def read_home_robot(self):
-        """Returns - Tuple of global_T_home & robot_recenter_yaw. Both will be None if Home.txt file doesn't exist"""
-        print("Reading robot pose w.r.t home from home.txt")
-        global_T_home = None
-        robot_recenter_yaw = None
-        if osp.isfile(HOME_TXT):
-            with open(HOME_TXT) as f:
-                data = f.read()
-            global_T_home = np.array([float(d) for d in data.split(", ")[:9]])
-            global_T_home = global_T_home.reshape([3, 3])
-            robot_recenter_yaw = float(data.split(", ")[-1])
-
-        return (global_T_home, robot_recenter_yaw)
+            self.loginfo(f"Wrote:\n{as_string}\nto: {HOME_TXT}")
 
     def get_base_transform_to(self, child_frame):
         kin_state = self.robot_state_client.get_robot_state().kinematic_state
@@ -1216,7 +1155,7 @@ class Spot:
         ).parent_tform_child
         return kin_state.position, kin_state.rotation
 
-    def dock(self, dock_id: int = DOCK_ID, home_robot: bool = True) -> None:
+    def dock(self, dock_id: int = DOCK_ID, home_robot: bool = False) -> None:
         """
         Dock the robot to the specified dock
         `blocking_dock_robot` will also move the robot to the dock if the dock is in view
@@ -1226,18 +1165,11 @@ class Spot:
             dock_id: The dock to dock to
             home_robot: Whether to reset home the robot after docking
         """
-        # If spot is NOT on docking station, blocking_dock_robot will raise an exception
-        # and home_txt will not get updated
         blocking_dock_robot(self.robot, dock_id)
         if home_robot:
-            print("Will Home Robot")
-            self.write_home_robot()
+            self.home_robot(write_to_file=True)
 
     def undock(self):
-        """
-        DO NOT USE THIS FUNCTION DIRECTLY.
-        USE def power_robot() INSTEAD.
-        """
         blocking_undock(self.robot)
 
     def power_robot(self):
@@ -1246,64 +1178,32 @@ class Spot:
         """
         self.power_on()
 
-        most_recent_global_T_home_and_yaw_tuple = self.read_home_robot()
-        exception_free_undocking: bool = True
-
         # Undock if docked, otherwise stand up
         try:
             self.undock()
         except Exception:
             print("Undocking failed: just standing up instead...")
-            exception_free_undocking = False
             self.blocking_stand()
 
-        if exception_free_undocking:
-            print(
-                "Robot undocked from docking station without exceptions, will update self.global_T_home"
-            )
-            (
-                self.global_T_home,
-                self.robot_recenter_yaw,
-            ) = most_recent_global_T_home_and_yaw_tuple
-        else:
-            print("Exception occured, will NOT update self.global_T_home")
-
-    def shutdown(self, should_dock: bool = False, home_robot=True) -> None:
+    def shutdown(self, should_dock: bool = False) -> None:
         """
         Stops the robot and docks it if should_dock is True else sits the robot down
 
         Args:
             should_dock: bool indicating whether to dock the robot or not
-            home_robot: bool indicating whether home.txt file should be updated or not
         """
-        print(f"Called spot.shutdown() with should_dock={should_dock}")
         try:
-            successful_docking = True
             if should_dock:
-                print(
-                    f"Executing automatic docking for Dock_ID={DOCK_ID}, home_robot={home_robot}"
-                )
+                print("Executing automatic docking")
                 dock_start_time = time.time()
                 while time.time() - dock_start_time < 2:
                     try:
-                        print("Searching for dock")
-                        self.dock(dock_id=DOCK_ID, home_robot=home_robot)
-                        successful_docking = True
+                        self.dock(dock_id=DOCK_ID, home_robot=True)
                     except Exception:
-                        print(
-                            "Exception occured while docking : ", traceback.print_exc()
-                        )
                         print("Dock not found... trying again")
-                        successful_docking = False
                         time.sleep(0.1)
-
-            print(
-                f"Docking status - should_dock={should_dock} , successful_docking={successful_docking}"
-            )
-            if not (should_dock and successful_docking):
-                print(
-                    "Did not reset home due as didn't dock on base. \nWill sit down here."
-                )
+            else:
+                print("Will sit down here")
                 self.sit()
         finally:
             self.power_off()
@@ -1317,7 +1217,7 @@ class Spot:
             img_src
             if img_src
             else [SpotCamIds.HAND_COLOR, SpotCamIds.HAND_DEPTH_IN_HAND_COLOR_FRAME]
-        )
+        )  # default img_src to gripper
 
         pixel_format_rgb = (
             image_pb2.Image.PIXEL_FORMAT_RGB_U8
@@ -1404,7 +1304,7 @@ class Spot:
 
     def get_ros_TransformStamped_vision_T_body(
         self, frame_tree_snapshot
-    ) -> TransformStamped:
+    ) :
         """
         Generates vision_T_body transform as a ROS TransformStamped message from the FrameTreeSnapshot
 
@@ -1420,7 +1320,7 @@ class Spot:
         )
         return ros_TransformStamped_vision_T_body
 
-    def get_ros_Pose_vision_T_body(self, frame_tree_snapshot) -> Pose:
+    def get_ros_Pose_vision_T_body(self, frame_tree_snapshot) :
         """
         Generates vision_T_body transform as a ROS Pose message from the FrameTreeSnapshot
 
@@ -1434,7 +1334,7 @@ class Spot:
         ros_Pose_vision_T_body = bd_SE3Pose_to_ros_Pose(bd_se3=vision_tform_body)
         return ros_Pose_vision_T_body
 
-    def get_magnum_Matrix4_spot_a_T_b(self, a: str, b: str, tree=None) -> mn.Matrix4:
+    def get_magnum_Matrix4_spot_a_T_b(self, a: str, b: str, tree=None):
         """
         Gets transformation from 'a' frame to 'b' frame such that a_T_b.
         `a` & `b` takes string values of the name of the frames
